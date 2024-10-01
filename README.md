@@ -31,8 +31,9 @@ pip install jaxlib==VERSION -f https://storage.googleapis.com/jax-releases/jax_r
 
  
 
-## Datasets
- 
+## Datasets and Checkpoints
+
+- flow-checkpoint of MRI images: [link](https://drive.google.com/file/d/1J9Q6Q1Q1J9Q6Q1Q1J9Q6Q1Q1J9Q6Q1Q1/view?usp=sharing)
 
 
 ## ICTM (our method)
@@ -44,8 +45,27 @@ We mainly use the following metrics to evaluate the generated images:
 - PSNR
 - SSIM
 
+
+Please make sure that your `eval_dir` folder structure is as follows:
+```
+-recon
+ --000001.png
+ ...
+-label
+ --000001.png 
+ ...
+```
+
+To get the PSNR and SSIM scores, (and LPIPS/FID), run the following command:
+```{bash}
+python get_metric.py --eval_dir=<path/to/evaldir> --enable_fid=<True/False> --gpu=<gpu_id>
+```
+
  
- 
+
+## Baselines
+- For Wavelet and TV norms, please check out package [DeepInverse](https://deepinv.github.io/deepinv/index.html)
+- For RedDiff and $\Pi$GDM, please check out repo [RED-Diff](https://github.com/NVlabs/RED-diff/tree/master)
 
 ## Citation
 
