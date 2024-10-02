@@ -1,6 +1,8 @@
 # 🔥 [NeurIPS 2024] Flow Priors for Linear Inverse Problems via Iterative Corrupted Trajectory Matching
 [![Static Badge](https://img.shields.io/badge/NeurIPS_2024_paper-arxiv_link-blue)
-](https://arxiv.org/abs/2405.18816) ![Static Badge](https://img.shields.io/badge/UCLA-red)
+](https://arxiv.org/abs/2405.18816) 
+
+
  
 
 This repository hosts the code and resources associated with our paper  on utlizing flow priors to solve linear inverse problems.
