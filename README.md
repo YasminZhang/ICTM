@@ -1,7 +1,14 @@
 # 🔥 [NeurIPS 2024] Flow Priors for Linear Inverse Problems via Iterative Corrupted Trajectory Matching
+[![Static Badge](https://img.shields.io/badge/NeurIPS_2024_paper-arxiv_link-blue)
+](https://arxiv.org/abs/2405.18816) ![Static Badge](https://img.shields.io/badge/UCLA-red)
+ 
 
-This repository hosts the code and resources associated with our [![Static Badge](https://img.shields.io/badge/NeurIPS_2024_paper-arxiv_link-blue)
-](https://arxiv.org/abs/2405.18816)  on utlizing flow priors to solve linear inverse problems.
+This repository hosts the code and resources associated with our paper  on utlizing flow priors to solve linear inverse problems.
+
+
+## Notebook
+We provide a simple notebook file to help you have a quick start. `demo.ipynb` will guide you through the process of running our code and evaluating the results.
+ 
 
 ## Abstract
  Generative models based on flow matching have attracted significant attention for their simplicity and superior performance in high-resolution image synthesis. By leveraging the instantaneous change-of-variables formula, one can directly compute image likelihoods from a learned flow, making them enticing candidates as priors for downstream tasks such as inverse problems. In particular, a natural approach would be to incorporate such image probabilities in a maximum-a-posteriori (MAP) estimation problem. A major obstacle, however, lies in the slow computation of the log-likelihood, as it requires backpropagating through an ODE solver, which can be prohibitively slow for high-dimensional problems. In this work, we propose an iterative algorithm to approximate the MAP estimator efficiently to solve a variety of linear inverse problems. Our algorithm is mathematically justified by the observation that the MAP objective can be approximated by a sum of $N$ ``local MAP'' objectives, where $N$ is the number of function evaluations. By leveraging Tweedie's formula, we show that we can perform gradient steps to sequentially optimize these objectives. We validate our approach for various linear inverse problems, such as super-resolution, deblurring, inpainting, and compressed sensing, and demonstrate that we can outperform other methods based on flow matching.
@@ -31,13 +38,19 @@ pip install jaxlib==VERSION -f https://storage.googleapis.com/jax-releases/jax_r
 
  
 
-## Datasets and Checkpoints
+## Checkpoints
+- flow-checkpoint of CelebAHQ images: please check out the repo [Recitified Flow](https://github.com/gnobitab/RectifiedFlow) or directly use the link [here](https://drive.google.com/file/d/1ryhuJGz75S35GEdWDLiq4XFrsbwPdHnF/view?usp=sharing)
+- flow-checkpoint of MRI images: [checkpoint](https://drive.google.com/file/d/16naw5jLuBLe-4IYmC8X-lZKlOFOIxrJh/view?usp=sharing)
 
-- flow-checkpoint of MRI images: [link](https://drive.google.com/file/d/1J9Q6Q1Q1J9Q6Q1Q1J9Q6Q1Q1J9Q6Q1Q1/view?usp=sharing)
+ 
 
 
 ## ICTM (our method)
  
+To run our method, please use the following command:
+```{bash}
+python main.py --config=<path/to/config.yaml> --gpu=<gpu_id>
+```
 
 
 ## Metrics
