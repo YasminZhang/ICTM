@@ -16,8 +16,6 @@
 """Training and evaluation"""
 
 import os
-# only cuda 0 and 1 are available
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 # add inverse folder to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'inverse'))

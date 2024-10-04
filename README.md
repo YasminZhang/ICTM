@@ -6,10 +6,7 @@
  
 
 This repository hosts the code and resources associated with our paper  on utlizing flow priors to solve linear inverse problems.
-
-
-## Notebook
-We provide a simple notebook file to help you have a quick start. `demo.ipynb` will guide you through the process of running our code and evaluating the results.
+ 
  
 
 ## Abstract
@@ -50,10 +47,16 @@ pip install jaxlib==VERSION -f https://storage.googleapis.com/jax-releases/jax_r
 ## ICTM (our method)
  
 To run our method, please use the following command:
-```{bash}
-python main.py --config=<path/to/config.yaml> --gpu=<gpu_id>
-```
 
+```
+CUDA_VISIBLE_DEVICES=1 python main.py --config ./configs/rectified_flow/celeba_hq_pytorch_rf_gaussian_inverse.py --eval_folder <eval_folder> --mode eval_inverse --workdir ./logs/celebahq_ckpt --config.eval.method ours --config.eval.task super_resolution --config.sampling.sample_N 100 --config.eval.eta 1.0e-02  --config.eval.k 1 --config.eval.lamda 1.0e+04 
+```
+- `task`: super_resolution, inpainting_box, gaussian,  inpainting, cs (compressed sensing)
+- `workdir`: where you save the checkpoints
+- `config.eval.lamda`: guidance weight
+- `config.eval.eta`: step size
+- `config.eval.k`: iteration number, default = 1
+- `config.sampling.sample_N`: number of sampling steps, default = 100
 
 ## Metrics
 We mainly use the following metrics to evaluate the generated images:

@@ -15,7 +15,7 @@
 
 # pylint: skip-file
 """Training and evaluation for score-based generative models. """
-from functools import partial
+
 import gc
 import io
 import os
@@ -41,17 +41,16 @@ from torch.utils import tensorboard
 from torchvision.utils import make_grid, save_image
 from utils import save_checkpoint, restore_checkpoint
 
-from inverse.measurements import get_operator, get_noise, get_cs_A
-from inverse.img_utils import clear_color, mask_generator  
+from inverse.measurements import get_operator, get_noise
+from inverse.img_utils import clear_color, mask_generator, psnr_fn, normalize_torch, unnormalize_torch
 import matplotlib.pyplot as plt
 
- 
-# import torchvision
-import torchvision
+from cleanfid import fid as fid_fn
+import lpips
+from pytorch_msssim import ssim
 
-
-
-
+# import defaultdict
+from collections import defaultdict
 
 FLAGS = flags.FLAGS
 
@@ -90,17 +89,26 @@ def train(config, workdir):
   initial_step = int(state['step'])
 
   # Build data iterators
-  train_ds, eval_ds = datasets.get_pytorch_dataset(config)
+  train_ds, eval_ds, _ = datasets.get_dataset(config,
+                                              uniform_dequantization=config.data.uniform_dequantization)
 
-  train_ds_loader = torch.utils.data.DataLoader(train_ds, batch_size=config.training.batch_size, shuffle=True, drop_last=True, num_workers=4)
-  eval_ds_loader = torch.utils.data.DataLoader(eval_ds, batch_size=config.training.batch_size, shuffle=True, drop_last=True, num_workers=4)
-
+  train_iter = iter(train_ds)  # pytype: disable=wrong-arg-types
+  eval_iter = iter(eval_ds)  # pytype: disable=wrong-arg-types
   # Create data normalizer and its inverse
   scaler = datasets.get_data_scaler(config)
   inverse_scaler = datasets.get_data_inverse_scaler(config)
 
   # Setup SDEs
-  if config.training.sde.lower() == 'rectified_flow':
+  if config.training.sde.lower() == 'vpsde':
+    sde = sde_lib.VPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'subvpsde':
+    sde = sde_lib.subVPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'vesde':
+    sde = sde_lib.VESDE(sigma_min=config.model.sigma_min, sigma_max=config.model.sigma_max, N=config.model.num_scales)
+    sampling_eps = 1e-5
+  elif config.training.sde.lower() == 'rectified_flow':
     sde = sde_lib.RectifiedFlow(init_type=config.sampling.init_type, noise_scale=config.sampling.init_noise_scale, use_ode_sampler=config.sampling.use_ode_sampler)
     sampling_eps = 1e-3
   else:
@@ -122,65 +130,63 @@ def train(config, workdir):
   if config.training.snapshot_sampling:
     sampling_shape = (config.training.batch_size, config.data.num_channels,
                       config.data.image_size, config.data.image_size)
-    sampling_fn = sampling.get_sampling_fn(config, sde, sampling_shape, inverse_scaler, sampling_eps)
+    sampling_fn = sampling.get_sampling_fn(config, sde, sampling_shape, inverse_scaler, sampling_eps, )
 
   num_train_steps = config.training.n_iters
 
   # In case there are multiple hosts (e.g., TPU pods), only log to host 0
   logging.info("Starting training loop at step %d." % (initial_step,))
 
-  step = initial_step - 1
-  while step <= (num_train_steps + 1):
-    for _, data in enumerate(train_ds_loader):
-        step += 1
-        batch = data.to(config.device).float()
-        batch = scaler(batch)
-    
-        # Execute one training step
-        loss = train_step_fn(state, batch)
-        if step % config.training.log_freq == 0:
-          logging.info("step: %d, training_loss: %.5e" % (step, loss.item()))
-          writer.add_scalar("training_loss", loss, step)
+  for step in range(initial_step, num_train_steps + 1):
+    # Convert data to JAX arrays and normalize them. Use ._numpy() to avoid copy.
+    # batch = torch.from_numpy(next(train_iter)['image']._numpy()).to(config.device).float()
+    batch = torch.from_numpy(next(train_iter)._numpy()).to(config.device).float()
+    batch = batch.permute(0, 3, 1, 2)
+    batch = scaler(batch)
+    # Execute one training step
+    loss = train_step_fn(state, batch)
+    if step % config.training.log_freq == 0:
+      logging.info("step: %d, training_loss: %.5e" % (step, loss.item()))
+      writer.add_scalar("training_loss", loss, step)
 
-        # Save a temporary checkpoint to resume training after pre-emption periodically
-        if step != 0 and step % config.training.snapshot_freq_for_preemption == 0:
-          save_checkpoint(checkpoint_meta_dir, state)
+    # Save a temporary checkpoint to resume training after pre-emption periodically
+    if step != 0 and step % config.training.snapshot_freq_for_preemption == 0:
+      save_checkpoint(checkpoint_meta_dir, state)
 
-        # Report the loss on an evaluation dataset periodically
-        if step % config.training.eval_freq == 0:
-          for _, eval_data in enumerate(eval_ds_loader):  
-            break  
-          eval_batch = eval_data.to(config.device).float()
-          eval_batch = scaler(eval_batch)
-          eval_loss = eval_step_fn(state, eval_batch)
-          logging.info("step: %d, eval_loss: %.5e" % (step, eval_loss.item()))
-          writer.add_scalar("eval_loss", eval_loss.item(), step)
+    # Report the loss on an evaluation dataset periodically
+    if step % config.training.eval_freq == 0:
+      # eval_batch = torch.from_numpy(next(eval_iter)['image']._numpy()).to(config.device).float()
+      eval_batch = torch.from_numpy(next(eval_iter)._numpy()).to(config.device).float()
+      eval_batch = eval_batch.permute(0, 3, 1, 2)
+      eval_batch = scaler(eval_batch)
+      eval_loss = eval_step_fn(state, eval_batch)
+      logging.info("step: %d, eval_loss: %.5e" % (step, eval_loss.item()))
+      writer.add_scalar("eval_loss", eval_loss.item(), step)
 
-        # Save a checkpoint periodically and generate samples if needed
-        if step != 0 and step % config.training.snapshot_freq == 0 or step == num_train_steps:
-          # Save the checkpoint.
-          save_step = step // config.training.snapshot_freq
-          save_checkpoint(os.path.join(checkpoint_dir, f'checkpoint_{save_step}.pth'), state)
+    # Save a checkpoint periodically and generate samples if needed
+    if step != 0 and step % config.training.snapshot_freq == 0 or step == num_train_steps:
+      # Save the checkpoint.
+      save_step = step // config.training.snapshot_freq
+      save_checkpoint(os.path.join(checkpoint_dir, f'checkpoint_{save_step}.pth'), state)
 
-          # Generate and save samples
-          if config.training.snapshot_sampling:
-            ema.store(score_model.parameters())
-            ema.copy_to(score_model.parameters())
-            sample, n = sampling_fn(score_model)
-            ema.restore(score_model.parameters())
-            this_sample_dir = os.path.join(sample_dir, "iter_{}".format(step))
-            tf.io.gfile.makedirs(this_sample_dir)
-            nrow = int(np.sqrt(sample.shape[0]))
-            image_grid = make_grid(sample, nrow, padding=2)
-           
-            sample = np.clip(sample.permute(0, 2, 3, 1).cpu().numpy() * 255, 0, 255).astype(np.uint8) # TODO: check this.
-            with tf.io.gfile.GFile(
-                os.path.join(this_sample_dir, "sample.np"), "wb") as fout:
-              np.save(fout, sample)
+      # Generate and save samples
+      if config.training.snapshot_sampling:
+        ema.store(score_model.parameters())
+        ema.copy_to(score_model.parameters())
+        sample, n = sampling_fn(score_model)
+        ema.restore(score_model.parameters())
+        this_sample_dir = os.path.join(sample_dir, "iter_{}".format(step))
+        tf.io.gfile.makedirs(this_sample_dir)
+        nrow = int(np.sqrt(sample.shape[0]))
+        image_grid = make_grid(sample, nrow, padding=2)
+        sample = np.clip(sample.permute(0, 2, 3, 1).cpu().numpy() * 255, 0, 255).astype(np.uint8)
+        with tf.io.gfile.GFile(
+            os.path.join(this_sample_dir, "sample.np"), "wb") as fout:
+          np.save(fout, sample)
 
-            with tf.io.gfile.GFile(
-                os.path.join(this_sample_dir, "sample.png"), "wb") as fout:
-              save_image(image_grid, fout)
+        with tf.io.gfile.GFile(
+            os.path.join(this_sample_dir, "sample.png"), "wb") as fout:
+          save_image(image_grid, fout)
 
 
 def evaluate(config,
@@ -199,10 +205,9 @@ def evaluate(config,
   tf.io.gfile.makedirs(eval_dir)
 
   # Build data pipeline
-  #train_ds, eval_ds, _ = datasets.get_dataset(config,
-  #                                            uniform_dequantization=config.data.uniform_dequantization,
-  #                                            evaluation=True)
-  train_ds, eval_ds = datasets.get_pytorch_dataset(config)
+  train_ds, eval_ds, _ = datasets.get_dataset(config,
+                                              uniform_dequantization=config.data.uniform_dequantization,
+                                              evaluation=True)
 
   # Create data normalizer and its inverse
   scaler = datasets.get_data_scaler(config)
@@ -217,7 +222,16 @@ def evaluate(config,
   checkpoint_dir = os.path.join(workdir, "checkpoints")
 
   # Setup SDEs
-  if config.training.sde.lower() == 'rectified_flow':
+  if config.training.sde.lower() == 'vpsde':
+    sde = sde_lib.VPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'subvpsde':
+    sde = sde_lib.subVPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'vesde':
+    sde = sde_lib.VESDE(sigma_min=config.model.sigma_min, sigma_max=config.model.sigma_max, N=config.model.num_scales)
+    sampling_eps = 1e-5
+  elif config.training.sde.lower() == 'rectified_flow':
     sde = sde_lib.RectifiedFlow(init_type=config.sampling.init_type, noise_scale=config.sampling.init_noise_scale, use_ode_sampler=config.sampling.use_ode_sampler, sigma_var=config.sampling.sigma_variance, ode_tol=config.sampling.ode_tol, sample_N=config.sampling.sample_N)
     sampling_eps = 1e-3
   else:
@@ -237,10 +251,8 @@ def evaluate(config,
 
 
   # Create data loaders for likelihood evaluation. Only evaluate on uniformly dequantized data
-  #train_ds_bpd, eval_ds_bpd, _ = datasets.get_dataset(config,
-  #                                                    uniform_dequantization=True, evaluation=True)
-  train_ds_bpd, eval_ds_bpd = datasets.get_pytorch_dataset(config)   ###NOTE: XC: fix later
-
+  train_ds_bpd, eval_ds_bpd, _ = datasets.get_dataset(config,
+                                                      uniform_dequantization=True, evaluation=True)
   if config.eval.bpd_dataset.lower() == 'train':
     ds_bpd = train_ds_bpd
     bpd_num_repeats = 1
@@ -253,10 +265,13 @@ def evaluate(config,
 
   # Build the likelihood computation function when likelihood is enabled
   if config.eval.enable_bpd:
-    likelihood_fn = likelihood.get_likelihood_fn(sde, inverse_scaler)
+    if config.training.sde.lower() == 'rectified_flow':
+      likelihood_fn = likelihood.get_likelihood_fn_rf(sde, inverse_scaler)
+    else:
+      likelihood_fn = likelihood.get_likelihood_fn(sde, inverse_scaler)
 
   # Build the sampling function when sampling is enabled
-  if (config.eval.enable_sampling) or (config.eval.enable_figures_only):
+  if config.eval.enable_sampling:
     sampling_shape = (config.eval.batch_size,
                       config.data.num_channels,
                       config.data.image_size, config.data.image_size)
@@ -268,7 +283,7 @@ def evaluate(config,
 
   begin_ckpt = config.eval.begin_ckpt
   logging.info("begin checkpoint: %d" % (begin_ckpt,))
-  for ckpt in range(begin_ckpt, config.eval.end_ckpt + 1):
+  for ckpt in range(begin_ckpt, config.eval.end_ckpt + 1, config.eval.gap_ckpt):
     # Wait if the target checkpoint doesn't exist yet
     waiting_message_printed = False
     ckpt_filename = os.path.join(checkpoint_dir, "checkpoint_{}.pth".format(ckpt))
@@ -290,7 +305,6 @@ def evaluate(config,
         time.sleep(120)
         state = restore_checkpoint(ckpt_path, state, device=config.device)
     ema.copy_to(score_model.parameters())
-    
     # Compute the loss function on the full evaluation dataset if loss computation is enabled
     if config.eval.enable_loss:
       all_losses = []
@@ -314,8 +328,19 @@ def evaluate(config,
     # Compute log-likelihoods (bits/dim) if enabled
     if config.eval.enable_bpd:
       bpds = []
+      
+      # TODO: read in all test_ckpt_*.npz file and store the results
+      # files = []
+      # for file in os.listdir(eval_dir):
+      #   if file.startswith('test_ckpt_') and file.endswith('.npz'):
+      #       files.append(file)
+      #       report_file = os.path.join(eval_dir, report_file)
+      #       report = np.load(report_file)
+ 
       for repeat in range(bpd_num_repeats):
         bpd_iter = iter(ds_bpd)  # pytype: disable=wrong-arg-types
+        length = len(ds_bpd)
+        logging.info('len(eval_set): %d' %length)
         for batch_id in range(len(ds_bpd)):
           batch = next(bpd_iter)
           eval_batch = torch.from_numpy(batch['image']._numpy()).to(config.device).float()
@@ -325,7 +350,7 @@ def evaluate(config,
           bpd = bpd.detach().cpu().numpy().reshape(-1)
           bpds.extend(bpd)
           logging.info(
-            "ckpt: %d, repeat: %d, batch: %d, mean bpd: %6f" % (ckpt, repeat, batch_id, np.mean(np.asarray(bpds))))
+            "ckpt: %d, repeat: %d, batch: %d/%d, mean bpd: %6f" % (ckpt, repeat, batch_id, length, np.mean(np.asarray(bpds))))
           bpd_round_id = batch_id + len(ds_bpd) * repeat
           # Save bits/dim to disk or Google Cloud Storage
           with tf.io.gfile.GFile(os.path.join(eval_dir,
@@ -334,10 +359,12 @@ def evaluate(config,
             io_buffer = io.BytesIO()
             np.savez_compressed(io_buffer, bpd)
             fout.write(io_buffer.getvalue())
-    
+
     # Generate samples and compute IS/FID/KID when enabled
     if config.eval.enable_sampling:
       num_sampling_rounds = config.eval.num_samples // config.eval.batch_size + 1
+      nfes = []
+      
       for r in range(num_sampling_rounds):
         logging.info("sampling -- ckpt: %d, round: %d" % (ckpt, r))
 
@@ -346,6 +373,10 @@ def evaluate(config,
           eval_dir, f"ckpt_{ckpt}")
         tf.io.gfile.makedirs(this_sample_dir)
         samples, n = sampling_fn(score_model)
+        nfes.append(n)
+        print('nfes', nfes)
+        print('mean nfe', np.mean(np.asarray(nfes)))
+         
         samples = np.clip(samples.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
         samples = samples.reshape(
           (-1, config.data.image_size, config.data.image_size, config.data.num_channels))
@@ -359,7 +390,7 @@ def evaluate(config,
         # Force garbage collection before calling TensorFlow code for Inception network
         gc.collect()
         latents = evaluation.run_inception_distributed(samples, inception_model,
-                                                       inceptionv3=inceptionv3)
+                                                      inceptionv3=inceptionv3)
         # Force garbage collection again before returning to JAX code
         gc.collect()
         # Save latent represents of the Inception network to disk or Google Cloud Storage
@@ -415,18 +446,6 @@ def evaluate(config,
         io_buffer = io.BytesIO()
         np.savez_compressed(io_buffer, IS=inception_score, fid=fid, kid=kid)
         f.write(io_buffer.getvalue())
-   
-
-    if config.eval.enable_figures_only:
-      import torchvision
-      num_sampling_rounds = config.eval.num_samples // config.eval.batch_size + 1
-      for r in range(num_sampling_rounds):
-        logging.info("sampling only figures -- ckpt: %d, round: %d" % (ckpt, r))
-        this_sample_dir = os.path.join(eval_dir, f"ckpt_{ckpt}")
-        
-        # Directory to save samples. Different for each host to avoid writing conflicts
-        samples, n = sampling_fn(score_model)
-        torchvision.utils.save_image(samples.clamp_(0.0, 1.0), os.path.join(this_sample_dir, '%d.png'%r), nrow=10, normalize=False)
 
 
 def evaluate_inverse(config,
@@ -440,50 +459,9 @@ def evaluate_inverse(config,
     eval_folder: The subfolder for storing evaluation results. Default to
       "eval".
   """
-
-  if config.eval.task == 'super_resolution':
-    config.eval.operator = {'name': 'super_resolution', 'in_shape': (1, 3, 256, 256), 'scale_factor': 4}
-  elif config.eval.task == 'inpainting':
-    config.eval.operator = {'name': 'inpainting'}
-    config.eval.mask_opt = {'mask_type': 'random', 'mask_prob_range': (0.7, 0.7), 'image_size': 256}
-  elif config.eval.task == 'inpainting_box':
-    config.eval.operator = {'name': 'inpainting'}
-    config.eval.mask_opt = {'mask_type': 'box', 'mask_len_range': (128, 129) , 'image_size': 256}
-  elif config.eval.task == 'gaussian':
-    config.eval.operator = {'name': 'gaussian_blur', 'kernel_size': 61, 'intensity': 3.0}
-  elif config.eval.task == 'nonlinear':
-    config.eval.operator = {'name': 'nonlinear_blur', 'opt_yml_path': '/home/yasmin/projects/RectifiedFlow/ImageGeneration/inverse/bkse/options/generate_blur/default.yml'}
-  elif config.eval.task == 'motion':
-    config.eval.operator = {'name': 'motion_blur', 'kernel_size': 61, 'intensity': 0.5}
-  elif config.eval.task == 'phase':
-    config.eval.operator = {'name': 'phase_retrieval', 'oversample': 2.0}
-  elif config.eval.task == 'mri':
-    config.eval.operator = {'name': 'mri', 'in_shape': 128,}
-  elif config.eval.task == 'cs':
-    config.eval.operator = {'name': 'cs', }
-    config.eval.noise = {'name': 'gaussian', 'sigma': 0.001}
-    # n_measurements, n_input, A, sign_pattern, indices
-    config.eval.operator['n_input'] = 128*128
-    config.eval.operator['n_measurements'] = int(128*128/config.eval.rate) 
-    config.eval.operator['A'] = np.random.randn( config.eval.operator['n_input'])
-    config.eval.operator['sign_pattern'] = np.random.randint(0, 2, config.eval.operator['n_input']) * 2 - 1
-    config.eval.operator['indices'] = np.random.choice(config.eval.operator['n_input'], config.eval.operator['n_measurements'], replace=False)
-  else:
-    raise ValueError(f"Task {config.eval.task} not recognized.")
-
-
- 
-  # Sampling configuration
-  logging.info(f"ODE sampler used: {config.sampling.use_ode_sampler}")
-  logging.info(f"Number of samples: {config.sampling.sample_N}")
-  logging.info(f"eta: {config.eval.eta}")
-
-  # Inverse problem evaluation configuration
-  logging.info(f"Batch size for evaluation: {config.eval.batch_size}")
-  logging.info(f"Initial value for evaluation: {config.eval.init}")
-  logging.info(f"Method for evaluation: {config.eval.method}")
-  
-
+  # set random seed
+  torch.manual_seed(config.eval.seed)
+  np.random.seed(config.eval.seed)
 
 
   # Create directory to eval_folder
@@ -491,10 +469,9 @@ def evaluate_inverse(config,
   tf.io.gfile.makedirs(eval_dir)
 
   # Build data pipeline
-  #train_ds, eval_ds, _ = datasets.get_dataset(config,
-  #                                            uniform_dequantization=config.data.uniform_dequantization,
-  #                                            evaluation=True)
-  train_ds, eval_ds = datasets.get_pytorch_dataset(config)
+  train_ds, eval_ds, _ = datasets.get_dataset(config,
+                                              uniform_dequantization=config.data.uniform_dequantization,
+                                              evaluation=True)
 
   # Create data normalizer and its inverse
   scaler = datasets.get_data_scaler(config)
@@ -509,7 +486,16 @@ def evaluate_inverse(config,
   checkpoint_dir = os.path.join(workdir, "checkpoints")
 
   # Setup SDEs
-  if config.training.sde.lower() == 'rectified_flow':
+  if config.training.sde.lower() == 'vpsde':
+    sde = sde_lib.VPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'subvpsde':
+    sde = sde_lib.subVPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'vesde':
+    sde = sde_lib.VESDE(sigma_min=config.model.sigma_min, sigma_max=config.model.sigma_max, N=config.model.num_scales)
+    sampling_eps = 1e-5
+  elif config.training.sde.lower() == 'rectified_flow':
     sde = sde_lib.RectifiedFlow(init_type=config.sampling.init_type, noise_scale=config.sampling.init_noise_scale, use_ode_sampler=config.sampling.use_ode_sampler, sigma_var=config.sampling.sigma_variance, ode_tol=config.sampling.ode_tol, sample_N=config.sampling.sample_N)
     sampling_eps = 1e-3
   else:
@@ -529,33 +515,35 @@ def evaluate_inverse(config,
 
 
   # Create data loaders for likelihood evaluation. Only evaluate on uniformly dequantized data
-  #train_ds_bpd, eval_ds_bpd, _ = datasets.get_dataset(config,
-  #                                                    uniform_dequantization=True, evaluation=True)
-  if config.eval.enable_bpd:
-    train_ds_bpd, eval_ds_bpd = datasets.get_pytorch_dataset(config)   ###NOTE: XC: fix later
-
-    if config.eval.bpd_dataset.lower() == 'train':
-      ds_bpd = train_ds_bpd
-      bpd_num_repeats = 1
-    elif config.eval.bpd_dataset.lower() == 'test':
-      # Go over the dataset 5 times when computing likelihood on the test dataset
-      ds_bpd = eval_ds_bpd
-      bpd_num_repeats = 5
-    else:
-      raise ValueError(f"No bpd dataset {config.eval.bpd_dataset} recognized.")
-
-  # Build the likelihood computation function when likelihood is enabled
-  if config.eval.enable_bpd:
-    likelihood_fn = likelihood.get_likelihood_fn(sde, inverse_scaler)
-
-  # Build the sampling function when sampling is enabled
-  if (config.eval.enable_sampling) or (config.eval.enable_figures_only):
+  train_ds_bpd, eval_ds_bpd, _ = datasets.get_dataset(config,
+                                                      uniform_dequantization=True, evaluation=True)
+  if config.eval.bpd_dataset.lower() == 'train':
+    ds_bpd = train_ds_bpd
+    bpd_num_repeats = 1
+  elif config.eval.bpd_dataset.lower() == 'test':
+    # Go over the dataset 5 times when computing likelihood on the test dataset
+    ds_bpd = eval_ds_bpd
+    bpd_num_repeats = 5
+  else:
+    raise ValueError(f"No bpd dataset {config.eval.bpd_dataset} recognized.")
+  
+  if config.eval.enable_inverse:
     sampling_shape = (config.eval.batch_size,
                       config.data.num_channels,
                       config.data.image_size, config.data.image_size)
-    sampling_fn = sampling.get_sampling_fn(config, sde, sampling_shape, inverse_scaler, sampling_eps)
-  
-  if config.eval.enable_inverse:
+    sampling_fn = sampling.get_sampling_fn(config, sde, sampling_shape, inverse_scaler, sampling_eps, inverse=True)
+    mu = np.load('/home/yasmin/projects/DATASETS/FFHQ/mean.npy')
+    Sigma_chol = np.load('/home/yasmin/projects/DATASETS/FFHQ/sigma.npy')
+
+  # Build the likelihood computation function when likelihood is enabled
+  if config.eval.enable_bpd:
+    if config.training.sde.lower() == 'rectified_flow':
+      likelihood_fn = likelihood.get_likelihood_fn_rf(sde, inverse_scaler)
+    else:
+      likelihood_fn = likelihood.get_likelihood_fn(sde, inverse_scaler)
+
+  # Build the sampling function when sampling is enabled
+  if config.eval.enable_sampling:
     sampling_shape = (config.eval.batch_size,
                       config.data.num_channels,
                       config.data.image_size, config.data.image_size)
@@ -567,7 +555,7 @@ def evaluate_inverse(config,
 
   begin_ckpt = config.eval.begin_ckpt
   logging.info("begin checkpoint: %d" % (begin_ckpt,))
-  for ckpt in range(begin_ckpt, config.eval.end_ckpt + 1):
+  for ckpt in range(begin_ckpt, config.eval.end_ckpt + 1, config.eval.gap_ckpt):
     # Wait if the target checkpoint doesn't exist yet
     waiting_message_printed = False
     ckpt_filename = os.path.join(checkpoint_dir, "checkpoint_{}.pth".format(ckpt))
@@ -589,9 +577,6 @@ def evaluate_inverse(config,
         time.sleep(120)
         state = restore_checkpoint(ckpt_path, state, device=config.device)
     ema.copy_to(score_model.parameters())
-
-
-    
     # Compute the loss function on the full evaluation dataset if loss computation is enabled
     if config.eval.enable_loss:
       all_losses = []
@@ -612,11 +597,45 @@ def evaluate_inverse(config,
         np.savez_compressed(io_buffer, all_losses=all_losses, mean_loss=all_losses.mean())
         fout.write(io_buffer.getvalue())
 
+    # Compute log-likelihoods (bits/dim) if enabled
+    if config.eval.enable_bpd:
+      bpds = []
+      
+      # TODO: read in all test_ckpt_*.npz file and store the results
+      # files = []
+      # for file in os.listdir(eval_dir):
+      #   if file.startswith('test_ckpt_') and file.endswith('.npz'):
+      #       files.append(file)
+      #       report_file = os.path.join(eval_dir, report_file)
+      #       report = np.load(report_file)
+ 
+      for repeat in range(bpd_num_repeats):
+        bpd_iter = iter(ds_bpd)  # pytype: disable=wrong-arg-types
+        length = len(ds_bpd)
+        logging.info('len(eval_set): %d' %length)
+        for batch_id in range(len(ds_bpd)):
+          batch = next(bpd_iter)
+          eval_batch = torch.from_numpy(batch['image']._numpy()).to(config.device).float()
+          eval_batch = eval_batch.permute(0, 3, 1, 2)
+          eval_batch = scaler(eval_batch)
+          bpd = likelihood_fn(score_model, eval_batch)[0]
+          bpd = bpd.detach().cpu().numpy().reshape(-1)
+          bpds.extend(bpd)
+          logging.info(
+            "ckpt: %d, repeat: %d, batch: %d/%d, mean bpd: %6f" % (ckpt, repeat, batch_id, length, np.mean(np.asarray(bpds))))
+          bpd_round_id = batch_id + len(ds_bpd) * repeat
+          # Save bits/dim to disk or Google Cloud Storage
+          with tf.io.gfile.GFile(os.path.join(eval_dir,
+                                              f"{config.eval.bpd_dataset}_ckpt_{ckpt}_bpd_{bpd_round_id}.npz"),
+                                 "wb") as fout:
+            io_buffer = io.BytesIO()
+            np.savez_compressed(io_buffer, bpd)
+            fout.write(io_buffer.getvalue())
 
     if config.eval.enable_inverse:
       # inverse operator
 
-      for img_dir in ['input', 'recon', 'progress', 'label']:
+      for img_dir in ['input', 'recon', 'progress', 'label', 'map']:
         os.makedirs(os.path.join(eval_dir, img_dir), exist_ok=True)
        
       operator = get_operator(device=config.device, **config.eval.operator)
@@ -627,16 +646,26 @@ def evaluate_inverse(config,
         **config.eval.mask_opt
         )
 
-
+      psnrs = []
+      lpipss = []
+      ssims = []
+      loss_fn_alex = lpips.LPIPS(net='vgg').to(config.device) # best forward scores
       
       bpd_iter = iter(eval_ds)  # pytype: disable=wrong-arg-types
-      for batch_id in range(len(eval_ds)):
+      mses = []
+      mses_label = []
+      # mse_table = ['MAP vs. Recon', 'MAP vs. Label', 'Recon vs. Label', 'Input vs. Label', 'Input vs. Recon', 'Input vs. MAP']
+      mse_table = defaultdict(list)
+      for batch_id in range(config.eval.number):
         # if batch_id == 1:
         #   break
         j = batch_id
         eval_batch = next(bpd_iter)
-        eval_batch = eval_batch[None, ...].to(config.device).float() # shape: [1, 3, 256, 256]
-        eval_batch = scaler(eval_batch)  # [0, 1] -> [-1, 1]
+        eval_batch = torch.from_numpy(eval_batch._numpy()).to(config.device).float()
+        # print('eval_batch', eval_batch.shape)
+        eval_batch = eval_batch.permute(0, 3, 1, 2)
+  
+        
         fname = str(j).zfill(5) + '.png'
  
         mask = None
@@ -648,88 +677,133 @@ def evaluate_inverse(config,
           # Forward measurement model (Ax + n)
           y = operator.forward(eval_batch, mask=mask)
           y_n = noiser(y)
-
-        elif config.eval.operator['name'] == 'mri':
-          import torchvision
-          y, imgs_to_save = operator.forward(eval_batch, return_img=True)
-          for j, tmp_img in enumerate(imgs_to_save):
-              tmp_img[2] = noiser(tmp_img[2])
-              torchvision.utils.save_image(tmp_img[[2,3]], os.path.join(eval_dir, 'input', fname), normalize=False, nrow=2)
-          y_n = noiser(y)
-        elif config.eval.operator['name'] == 'cs':
-         
-          y = operator.forward(eval_batch  )
-         
-          y_n = noiser(y)
-         
         else: 
           # Forward measurement model (Ax + n)
           y = operator.forward(eval_batch)
           y_n = noiser(y)
-        
-         
-         
-        
+
+        y_ = y_n.clone()
+        y_n = scaler(y_n)
  
         # Sampling
         if config.eval.init == 0.0:
           x_start = torch.randn(eval_batch.shape, device=config.device) 
         else:
-          if config.eval.operator['name'] == 'cs':
-            x_start = config.eval.init * operator.transpose(y_n)  +  (1 - config.eval.init) * torch.randn(eval_batch.shape, device=config.device)
-            print(x_start.shape, y_n.shape, eval_batch.shape)
-          else:
-            x_start = config.eval.init * operator.transpose(y_n)  +  (1 - config.eval.init) * torch.randn(eval_batch.shape, device=config.device) 
-        sample, nfe = sampling_fn(model=score_model, z=x_start, measurement=y_n, task=config.eval.task,  init=config.eval.init,  operator=operator, record=False, save_root=eval_dir, 
-                                  n_trace=config.eval.n_trace,alpha = config.eval.alpha, eta_scheduler=config.eval.eta_scheduler,  beta=config.eval.beta, zeta=config.eval.zeta, num_iter=config.eval.k, lamda = config.eval.lamda, stop_time=config.eval.stop_time,  eta=config.eval.eta, method=config.eval.method, nita=config.eval.nita,  mask=mask)
+          x_start = config.eval.init * operator.transpose(y_n)  +  (1 - config.eval.init) * torch.randn(eval_batch.shape, device=config.device) 
+        sample, nfe = sampling_fn(model=score_model, z=x_start, measurement=y_n, init=config.eval.init,  operator=operator, record=False, save_root=eval_dir, 
+                                  n_trace=config.eval.n_trace, zeta=config.eval.zeta, num_iter=config.eval.k, lamda = config.eval.lamda, eta=config.eval.eta, method=config.eval.method, nita=config.eval.nita,  mask=mask)
 
-     
+        # clear_color use x - x.min() / x.max() - x.min() to make the image in [0, 1]
+        # print('y_n', y_n.shape)
+        # print('eval_batch', eval_batch.shape)
+        # print('sample', sample.shape)
+        # save grayscale images
 
+
+
+
+
+       
+
+
+
+
+
+
+        y_n = y_n - y_n.min()
+        y_n = y_n / y_n.max()
       
-      if config.eval.operator['name'] == 'mri' or config.eval.operator['name'] == 'cs':
         sample = sample - sample.min()
         sample = sample / sample.max()
-        eval_batch = eval_batch - eval_batch.min()
-        eval_batch = eval_batch / eval_batch.max()
+
+
+
+        MAP = map_denoising(mu, Sigma_chol, y_, config.eval.noise['sigma'])
+
+        plt.imsave(os.path.join(eval_dir, 'map', fname), MAP[0, 0], cmap='gray')
+       
+        # plt.imsave(os.path.join(eval_dir, 'input', fname), clear_color(y_n))
+        # plt.imsave(os.path.join(eval_dir, 'label', fname), clear_color(eval_batch))
+        # plt.imsave(os.path.join(eval_dir, 'recon', fname), clear_color(sample))
+        plt.imsave(os.path.join(eval_dir, 'input', fname), y_n[0, 0].cpu().numpy(), cmap='gray')
         plt.imsave(os.path.join(eval_dir, 'label', fname), eval_batch[0, 0].cpu().numpy(), cmap='gray')
         plt.imsave(os.path.join(eval_dir, 'recon', fname), sample[0, 0].cpu().numpy(), cmap='gray')
-      else:
-        plt.imsave(os.path.join(eval_dir, 'input', fname), clear_color(y_n))
-        plt.imsave(os.path.join(eval_dir, 'label', fname), clear_color(eval_batch))
-        plt.imsave(os.path.join(eval_dir, 'recon', fname), clear_color(sample))
+
+        #calculate MSE between MAP and recon
+        mse = ((MAP - sample.cpu().numpy()) ** 2).mean()
+        logging.info(f"batch: {batch_id}, MSE: {mse}")
+        # calculate MSE between recon and label
+        mse_label = ((eval_batch.cpu().numpy() - sample.cpu().numpy()) ** 2).mean()
+        mses_label.append(mse_label)
+        mses.append(mse)
+
+        # compare map, y_n, eval_batch, sample one by one
+        # MAP, Measurement, Ground Truth, Reconstruction
+        # images  = [MAP[0, 0], y_n[0,0].cpu.numpy(), eval_batch[0,0].cpu().numpy(), sample[0,0].cpu().numpy()]
+        # for i in range(4):
+        #   for j in range(i, 4):
+        #     diff = ((images[i] - images[j])**2).mean()
+        #     mse_table[f'{i}{j}'].append(diff)
+        
+      
 
 
-    
 
 
+        # c, d = unnormalize_torch(*normalize_torch(eval_batch, sample)) # clear color
+        # c, d = eval_batch, sample
 
-    # Compute log-likelihoods (bits/dim) if enabled
-    if config.eval.enable_bpd:
-      bpds = []
-      for repeat in range(bpd_num_repeats):
-        bpd_iter = iter(ds_bpd)  # pytype: disable=wrong-arg-types
-        for batch_id in range(len(ds_bpd)):
-          batch = next(bpd_iter)
-          eval_batch = torch.from_numpy(batch['image']._numpy()).to(config.device).float()
-          eval_batch = eval_batch.permute(0, 3, 1, 2)
-          eval_batch = scaler(eval_batch)
-          bpd = likelihood_fn(score_model, eval_batch)[0]
-          bpd = bpd.detach().cpu().numpy().reshape(-1)
-          bpds.extend(bpd)
-          logging.info(
-            "ckpt: %d, repeat: %d, batch: %d, mean bpd: %6f" % (ckpt, repeat, batch_id, np.mean(np.asarray(bpds))))
-          bpd_round_id = batch_id + len(ds_bpd) * repeat
-          # Save bits/dim to disk or Google Cloud Storage
-          with tf.io.gfile.GFile(os.path.join(eval_dir,
-                                              f"{config.eval.bpd_dataset}_ckpt_{ckpt}_bpd_{bpd_round_id}.npz"),
-                                 "wb") as fout:
-            io_buffer = io.BytesIO()
-            np.savez_compressed(io_buffer, bpd)
-            fout.write(io_buffer.getvalue())
-    
+
+        # # PNSR
+        # psnr = psnr_fn(c, d)
+        # logging.info(f"batch: {batch_id}, PSNR: {psnr}")
+        # psnrs.append(psnr)
+        # # SSIM
+        
+        # ssim_val = ssim((c+1)/2, (d+1)/2, data_range=1, size_average=True).item()
+        # logging.info(f"batch: {batch_id}, SSIM: {ssim_val}")
+        # ssims.append(ssim_val)
+        # # LPIPS
+        # lpips_val = loss_fn_alex(c, d).mean().item()
+        # lpipss.append(lpips_val)
+        # logging.info(f"batch: {batch_id}, LPIPS: {lpips_val}")
+      
+      # report PSNR, SSIM, LPIPS
+      # logging.info(f"ckpt: {ckpt}, LPIPS: {np.mean(lpipss):.3f} +- {np.std(lpipss):.2f}")
+      # logging.info(f"ckpt: {ckpt}, PSNR: {np.mean(psnrs):.2f} +- {np.std(psnrs):.2f}")
+      # logging.info(f"ckpt: {ckpt}, SSIM: {np.mean(ssims):.3f} +- {np.std(ssims):.2f}")
+      # # report LPIPS, PSNR, SSIM in one line
+      # logging.info(f"ckpt: {ckpt},  {np.mean(lpipss):.3f} +- {np.std(lpipss):.2f}  {np.mean(psnrs):.2f} +- {np.std(psnrs):.2f} {np.mean(ssims):.3f} +- {np.std(ssims):.2f}")
+      
+      #report MSE
+      logging.info(f"ckpt: {ckpt}, MSE: {np.mean(mses):1.2e} +- {np.std(mses):1.2e}")
+      # # plot the histogram of MSE
+      # plt.hist(mses )
+      # plt.savefig(os.path.join(eval_dir, 'mse.png'))
+      # plt.close()
+      # # report MSE between recon and label
+      # logging.info(f"ckpt: {ckpt}, MSE_label: {np.mean(mses_label):1.2e} +- {np.std(mses_label):1.2e}")
+      # # plot the histogram of MSE between recon and label
+      # plt.hist(mses_label )
+      # plt.savefig(os.path.join(eval_dir, 'mse_label.png'))
+      # plt.close()
+      
+      # logging MSE table
+      for key, value in mse_table.items():
+        logging.info(f"ckpt: {ckpt}, {key}: {np.mean(value):1.2e} +- {np.std(value):1.2e}")
+
+
+      if config.eval.compute_fid:
+        fid_score = fid_fn.compute_fid(eval_dir + '/label', eval_dir + '/recon')
+        # report FID
+        logging.info(f"ckpt: {ckpt}, FID: {fid_score}")
+
+
     # Generate samples and compute IS/FID/KID when enabled
     if config.eval.enable_sampling:
       num_sampling_rounds = config.eval.num_samples // config.eval.batch_size + 1
+      nfes = []
+      
       for r in range(num_sampling_rounds):
         logging.info("sampling -- ckpt: %d, round: %d" % (ckpt, r))
 
@@ -738,6 +812,10 @@ def evaluate_inverse(config,
           eval_dir, f"ckpt_{ckpt}")
         tf.io.gfile.makedirs(this_sample_dir)
         samples, n = sampling_fn(score_model)
+        nfes.append(n)
+        print('nfes', nfes)
+        print('mean nfe', np.mean(np.asarray(nfes)))
+         
         samples = np.clip(samples.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
         samples = samples.reshape(
           (-1, config.data.image_size, config.data.image_size, config.data.num_channels))
@@ -751,7 +829,7 @@ def evaluate_inverse(config,
         # Force garbage collection before calling TensorFlow code for Inception network
         gc.collect()
         latents = evaluation.run_inception_distributed(samples, inception_model,
-                                                       inceptionv3=inceptionv3)
+                                                      inceptionv3=inceptionv3)
         # Force garbage collection again before returning to JAX code
         gc.collect()
         # Save latent represents of the Inception network to disk or Google Cloud Storage
@@ -807,17 +885,26 @@ def evaluate_inverse(config,
         io_buffer = io.BytesIO()
         np.savez_compressed(io_buffer, IS=inception_score, fid=fid, kid=kid)
         f.write(io_buffer.getvalue())
-   
 
-    if config.eval.enable_figures_only:
-      import torchvision
-      num_sampling_rounds = config.eval.num_samples // config.eval.batch_size + 1
-      for r in range(num_sampling_rounds):
-        logging.info("sampling only figures -- ckpt: %d, round: %d" % (ckpt, r))
-        this_sample_dir = os.path.join(eval_dir, f"ckpt_{ckpt}")
-        
-        # Directory to save samples. Different for each host to avoid writing conflicts
-        samples, n = sampling_fn(score_model)
-        torchvision.utils.save_image(samples.clamp_(0.0, 1.0), os.path.join(this_sample_dir, '%d.png'%r), nrow=10, normalize=False)
-        
-        
+
+
+def map_denoising(mu, Sigma_chol, y, sigma_y):
+    # Compute Sigma inverse
+    Sigma_inv = np.linalg.inv(np.dot(Sigma_chol, Sigma_chol.T))
+
+    # Compute intermediate terms
+    term1 = np.dot(Sigma_inv, mu.flatten())
+ 
+     
+    # change y to numpy
+    y = y.cpu().numpy()
+    # Compute MAP estimate x_*
+    c = term1 + (1 / (sigma_y**2)) * y.flatten()
+    x_star = np.dot(np.linalg.inv(Sigma_inv + (1 / (sigma_y**2)) * np.eye(Sigma_inv.shape[0])), c)
+
+
+    x_star -= x_star.min()
+    x_star /= x_star.max()
+
+    x_star = x_star.reshape(1,1,16,16)
+    return x_star
