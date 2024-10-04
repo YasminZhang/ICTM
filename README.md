@@ -37,10 +37,11 @@ pip install jaxlib==VERSION -f https://storage.googleapis.com/jax-releases/jax_r
 
  
 
-## Checkpoints
+## Checkpoints & Datasets
 - flow-checkpoint of CelebAHQ images: please check out the repo [Recitified Flow](https://github.com/gnobitab/RectifiedFlow) or directly use the link [here](https://drive.google.com/file/d/1ryhuJGz75S35GEdWDLiq4XFrsbwPdHnF/view?usp=sharing)
 - flow-checkpoint of MRI images: [checkpoint](https://drive.google.com/file/d/16naw5jLuBLe-4IYmC8X-lZKlOFOIxrJh/view?usp=sharing)
-
+- CelebAHQ: we randomly select 100 images of the test set of CelebAHQ dataset
+- MRI: we randomly select 200 images of HCP T2w test dataset [link](https://www.humanconnectome.org/study/hcp-young-adult/document/1200-subjects-data-release)
  
 
 

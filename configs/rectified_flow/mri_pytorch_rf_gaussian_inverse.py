@@ -27,8 +27,8 @@ def get_config():
   training.continuous = False
   training.reduce_mean = True
   training.snapshot_freq = 2000
-  training.data_dir = '/home/yasmin/projects/RectifiedFlow/ImageGeneration/mri/train2000'
-  training.eval_dir = '/home/yasmin/projects/RectifiedFlow/ImageGeneration/mri/test200'
+  training.data_dir = 'train'
+  training.eval_dir = 'test'
   training.n_iters = 1300001
   training.log_freq = 100
   training.eval_freq = 100
@@ -54,8 +54,8 @@ def get_config():
   eval.k = 1
   eval.n_trace = 1
   eval.zeta = 1.
-  eval.nita = 10.
-  eval.stop_time = 0.9
+  eval.nita = 1
+  eval.stop_time = 1
   eval.alpha = 1.
   eval.beta = 1.
   eval.eta_scheduler = 'constant'

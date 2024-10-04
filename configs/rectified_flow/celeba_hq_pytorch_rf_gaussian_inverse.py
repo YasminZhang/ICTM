@@ -27,8 +27,8 @@ def get_config():
   training.continuous = False
   training.reduce_mean = True
   training.snapshot_freq = 100000
-  training.data_dir = '/home/yasmin/projects/stargan-v2/data/celeba_hq/val/subset5' # subset5: 5 images, subset100: 100 images
-
+  training.data_dir = 'train'
+  training.eval_dir = 'test'
   # sampling
   sampling = config.sampling
   sampling.method = 'rectified_flow'
@@ -47,14 +47,14 @@ def get_config():
   eval.eta = 1.0 # step size of the gradient descent
   eval.batch_size = 1
   eval.init = 0.0
-  eval.method = 'naive' # ['naive', 'pseudo', 'mc']
+  eval.method = 'ours' 
   eval.compute_fid = False
   eval.lamda = 100.0
   eval.k = 1
   eval.n_trace = 1
   eval.zeta = 1.
-  eval.nita = 10.
-  eval.stop_time = 0.9
+  eval.nita = 1
+  eval.stop_time = 1
   eval.alpha = 1.
   eval.beta = 1.
   eval.eta_scheduler = 'constant'
