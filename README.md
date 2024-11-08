@@ -1,6 +1,9 @@
 # 🔥 [NeurIPS 2024] Flow Priors for Linear Inverse Problems via Iterative Corrupted Trajectory Matching
 [![Static Badge](https://img.shields.io/badge/NeurIPS_2024_paper-arxiv_link-blue)
 ](https://arxiv.org/abs/2405.18816) 
+[![Static Badge](https://img.shields.io/badge/NeurIPS_2024_paper-Open_Review-red)
+](https://openreview.net/forum?id=1H2e7USI09) 
+
 
 
  
@@ -94,7 +97,7 @@ If you find the code or our results useful, please cite as:
 @inproceedings{
 zhang2024flow,
 title={Flow Priors for Linear Inverse Problems via  Iterative Corrupted Trajectory Matching},
-author={Yasi Zhang, Peiyu Yu, Yaxuan Zhu, Yingshan Chang, Feng Gao, Ying Nian Wu, Oscar Leong},
+author={Yasi Zhang and Peiyu Yu and Yaxuan Zhu and Yingshan Chang and Feng Gao and Ying Nian Wu and Oscar Leong},
 booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
 year={2024},
 url={https://openreview.net/forum?id=1H2e7USI09}
