@@ -95,13 +95,12 @@ python get_metric.py --eval_dir=<path/to/evaldir> --enable_fid=<True/False> --gp
 If you find the code or our results useful, please cite as:
 
 ```bibtex
-@inproceedings{
-zhang2024flow,
-title={Flow Priors for Linear Inverse Problems via  Iterative Corrupted Trajectory Matching},
-author={Yasi Zhang and Peiyu Yu and Yaxuan Zhu and Yingshan Chang and Feng Gao and Ying Nian Wu and Oscar Leong},
-booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
-year={2024},
-url={https://openreview.net/forum?id=1H2e7USI09}
+@article{zhang2024flow,
+  title={Flow Priors for Linear Inverse Problems via Iterative Corrupted Trajectory Matching},
+  author={Zhang, Yasi and Yu, Peiyu and Zhu, Yaxuan and Chang, Yingshan and Gao, Feng and Wu, Ying Nian and Leong, Oscar},
+  journal={arXiv preprint arXiv:2405.18816},
+  year={2024}
+}
 }
 ```
 
