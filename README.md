@@ -101,7 +101,6 @@ If you find the code or our results useful, please cite as:
   journal={arXiv preprint arXiv:2405.18816},
   year={2024}
 }
-}
 ```
 
 
