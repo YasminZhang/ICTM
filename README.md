@@ -88,6 +88,7 @@ python get_metric.py --eval_dir=<path/to/evaldir> --enable_fid=<True/False> --gp
 ## Baselines
 - For Wavelet and TV norms, please check out package [DeepInverse](https://deepinv.github.io/deepinv/index.html)
 - For RedDiff and $\Pi$GDM, please check out repo [RED-Diff](https://github.com/NVlabs/RED-diff/tree/master)
+- 🔥 For new baselines in flow matching, we refer to this great repo [PnP-flow](https://github.com/annegnx/PnP-Flow) 
 
 ## Citation
 
